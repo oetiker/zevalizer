@@ -1,0 +1,46 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, darwin, windows]
+        arch: [amd64, arm64]
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          body: "Automated release"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: '1.20'
+      - name: Build
+        run: |
+          if [ "${{ matrix.os }}" = "windows" ]; then EXT=.exe; else EXT=; fi
+          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -o "zevalizer_${{ matrix.os }}_${{ matrix.arch }}${EXT}" cmd/zevalizer/main.go
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_name: "zevalizer_${{ matrix.os }}_${{ matrix.arch }}"
+          asset_path: "zevalizer_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.os == 'windows' && '.exe' || '' }}"
+          asset_content_type: application/octet-stream

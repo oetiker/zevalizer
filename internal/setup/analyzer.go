@@ -1,0 +1,65 @@
+// internal/setup/analyzer.go
+package setup
+
+import (
+	"fmt"
+	"zevalizer/internal/api"
+	"zevalizer/internal/config"
+)
+
+type Analyzer struct {
+	client *api.Client
+}
+
+func NewAnalyzer(client *api.Client) *Analyzer {
+	return &Analyzer{client: client}
+}
+
+func (sa *Analyzer) AnalyzeSetup(smId string) (*config.ZEVConfig, error) {
+	// Get all sensors
+	sensors, err := sa.client.GetSensors(smId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sensors: %v", err)
+	}
+
+	zevConfig := &config.ZEVConfig{}
+
+	// Find main grid meter
+	for _, sensor := range sensors {
+		if sensor.Type == "Smart Meter" &&
+			sensor.DeviceType == "sub-meter" &&
+			sensor.Data.SubMeterCostTypes == 1 {
+			zevConfig.GridMeterID = sensor.ID
+			break
+		}
+	}
+
+	// Find production meters (inverters and their measurements)
+	// Find production meters - only use the inverter devices
+	for _, sensor := range sensors {
+		if sensor.Type == "Inverter" &&
+			sensor.DeviceType == "inverter" {
+			zevConfig.ProductionIDs = append(zevConfig.ProductionIDs, sensor.ID)
+		}
+	}
+
+	// Find battery system meter
+	for _, sensor := range sensors {
+		if sensor.Type == "Battery" &&
+			sensor.DeviceType == "device" {
+			zevConfig.BatterySystemIDs = append(zevConfig.BatterySystemIDs, sensor.ID)
+		}
+	}
+
+	// Find consumer meters
+	for _, sensor := range sensors {
+		if sensor.Type == "Smart Meter" &&
+			sensor.DeviceType == "sub-meter" &&
+			sensor.Data.SubMeterCostTypes == 0 {
+			zevConfig.ConsumerIDs = append(zevConfig.ConsumerIDs, sensor.ID)
+
+		}
+	}
+
+	return zevConfig, nil
+}

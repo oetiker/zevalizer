@@ -1,0 +1,10 @@
+# IDE files
+.idea/
+.vscode/
+
+# Binary files
+bin/
+cmd/zevalizer/zevalizer
+
+# Config files with sensitive data
+config.yaml
