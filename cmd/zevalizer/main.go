@@ -54,31 +54,42 @@ func printSetupHint(zevConfig *config.ZEVConfig) {
 // Update the analyzeEnergy function in main.go
 
 func analyzeEnergy(client *api.Client, cfg *config.Config, smId string, from, to time.Time) error {
-	energyAnalyzer := analyzer.NewEnergyAnalyzer(client, &cfg.ZEV, cfg.Debug)
-	stats, err := energyAnalyzer.Analyze(smId, from, to)
+	energyAnalyzer := analyzer.NewEnergyAnalyzer(client, cfg)
+	statsLT, statsHT, err := energyAnalyzer.Analyze(smId, from, to)
 	if err != nil {
 		return fmt.Errorf("analyzing energy data: %v", err)
 	}
-
 	// Print summary
 	fmt.Printf("\nEnergy Analysis for period: %s to %s\n\n",
 		from.Format("2006-01-02 15:04"),
 		to.Format("2006-01-02 15:04"))
 
+	fmt.Printf("High Tariff Energy %d:00 - %d:00\n", cfg.LowTariff.EndHour, cfg.LowTariff.StartHour)
+	fmt.Printf("------------------------------------------------\n")
+	printEnergyStats(statsHT)
+	fmt.Printf("Low Tariff Energy %d:00 - %d:00\n", cfg.LowTariff.StartHour, cfg.LowTariff.EndHour)
+	fmt.Printf("------------------------------------------------\n")
+	printEnergyStats(statsLT)
+	return nil
+}
+
+func printEnergyStats(stats *analyzer.EnergyStats) {
+
 	fmt.Printf("System Overview:\n")
 	fmt.Printf("---------------\n")
-	fmt.Printf("Grid Import:       %.1f kWh\n", stats.GridImport/1000)
-	fmt.Printf("Grid Export:       %.1f kWh\n", stats.GridExport/1000)
-	fmt.Printf("Production:        %.1f kWh\n", stats.Production/1000)
-	fmt.Printf("Battery Charge:    %.1f kWh\n", stats.BatteryCharge/1000)
-	fmt.Printf("Battery Discharge: %.1f kWh\n", stats.BatteryDischarge/1000)
-	fmt.Printf("Self Consumption:  %.1f%%\n", stats.SelfConsumptionRate())
-	fmt.Printf("Autarchy:         %.1f%%\n", stats.AutarchyRate())
+	fmt.Printf("Grid Import:       %8.1f kWh\n", stats.GridImport/1000)
+	fmt.Printf("Grid Export:       %8.1f kWh\n", stats.GridExport/1000)
+	fmt.Printf("Production:        %8.1f kWh\n", stats.Production/1000)
+	fmt.Printf("Consumption:       %8.1f kWh\n", stats.Consumption/1000)
+	fmt.Printf("Battery Charge:    %8.1f k Wh\n", stats.BatteryCharge/1000)
+	fmt.Printf("Battery Discharge: %8.1f kWh\n", stats.BatteryDischarge/1000)
+	fmt.Printf("Self Consumption:  %8.1f %%\n", stats.SelfConsumptionRate())
+	fmt.Printf("Autarchy:          %8.1f %%\n", stats.AutarchyRate())
 
 	fmt.Printf("\nEnergy Balance:\n")
 	fmt.Printf("--------------\n")
-	totalInput := stats.GridImport + stats.Production + stats.BatteryDischarge
-	totalOutput := stats.GridExport + stats.BatteryCharge
+	totalInput := stats.GridImport + stats.Production
+	totalOutput := stats.GridExport + stats.Consumption
 	for _, consumer := range stats.Consumers {
 		if consumer.Sensor.Tag.Name != "Unaccounted Energy" {
 			totalOutput += consumer.Total
@@ -91,7 +102,7 @@ func analyzeEnergy(client *api.Client, cfg *config.Config, smId string, from, to
 	fmt.Printf("\nConsumer Details:\n")
 	fmt.Printf("----------------\n")
 	fmt.Printf("%-15s %13s %13s %13s %13s\n",
-		"Name", "Total", "Solar", "Battery", "Grid")
+		"Name", "Total", "Inverter", "Battery", "Grid")
 	fmt.Printf("%s\n", strings.Repeat("-", 71))
 
 	// First print regular consumers
@@ -100,13 +111,12 @@ func analyzeEnergy(client *api.Client, cfg *config.Config, smId string, from, to
 		fmt.Printf("%-15s %9.1f kWh %9.1f kWh %9.1f kWh %9.1f kWh\n",
 			consumer.Sensor.Tag.Name,
 			consumer.Total/1000,
-			consumer.Sources.FromSolar/1000,
+			consumer.Sources.FromInverter/1000,
 			consumer.Sources.FromBattery/1000,
 			consumer.Sources.FromGrid/1000)
 
 	}
-
-	return nil
+	fmt.Printf("\n")
 }
 
 func parseDate(dateStr string) (time.Time, error) {

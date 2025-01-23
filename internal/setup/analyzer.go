@@ -29,7 +29,7 @@ func (sa *Analyzer) AnalyzeSetup(smId string) (*config.ZEVConfig, error) {
 		if sensor.Type == "Smart Meter" &&
 			sensor.DeviceType == "sub-meter" &&
 			sensor.Data.SubMeterCostTypes == 1 {
-			zevConfig.GridMeterID = sensor.ID
+			zevConfig.GridMeterID = sensor.ID + "  # " + sensor.Tag.Name
 			break
 		}
 	}
@@ -37,9 +37,10 @@ func (sa *Analyzer) AnalyzeSetup(smId string) (*config.ZEVConfig, error) {
 	// Find production meters (inverters and their measurements)
 	// Find production meters - only use the inverter devices
 	for _, sensor := range sensors {
-		if sensor.Type == "Inverter" &&
-			sensor.DeviceType == "inverter" {
-			zevConfig.ProductionIDs = append(zevConfig.ProductionIDs, sensor.ID)
+		if sensor.Type == "Smart Meter" &&
+			sensor.DeviceType == "sub-meter" &&
+			sensor.Data.SubMeterCostTypes == 2 {
+			zevConfig.ProductionIDs = append(zevConfig.ProductionIDs, sensor.ID+"  # "+sensor.Tag.Name)
 		}
 	}
 
@@ -47,7 +48,7 @@ func (sa *Analyzer) AnalyzeSetup(smId string) (*config.ZEVConfig, error) {
 	for _, sensor := range sensors {
 		if sensor.Type == "Battery" &&
 			sensor.DeviceType == "device" {
-			zevConfig.BatterySystemIDs = append(zevConfig.BatterySystemIDs, sensor.ID)
+			zevConfig.BatterySystemIDs = append(zevConfig.BatterySystemIDs, sensor.ID+"  # "+sensor.Tag.Name)
 		}
 	}
 
@@ -56,7 +57,7 @@ func (sa *Analyzer) AnalyzeSetup(smId string) (*config.ZEVConfig, error) {
 		if sensor.Type == "Smart Meter" &&
 			sensor.DeviceType == "sub-meter" &&
 			sensor.Data.SubMeterCostTypes == 0 {
-			zevConfig.ConsumerIDs = append(zevConfig.ConsumerIDs, sensor.ID)
+			zevConfig.ConsumerIDs = append(zevConfig.ConsumerIDs, sensor.ID+"  # "+sensor.Tag.Name)
 
 		}
 	}

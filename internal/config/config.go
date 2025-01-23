@@ -13,6 +13,11 @@ type APIConfig struct {
 	BaseURL  string `yaml:"baseUrl"`
 }
 
+type LowTariffConfig struct {
+	StartHour int `yaml:"startHour"`
+	EndHour   int `yaml:"endHour"`
+}
+
 type ZEVConfig struct {
 	GridMeterID      string   `yaml:"gridMeterId"`
 	ProductionIDs    []string `yaml:"productionIds"`
@@ -20,9 +25,10 @@ type ZEVConfig struct {
 	BatterySystemIDs []string `yaml:"batterySystemId"` // IDs of the battery smart meter
 }
 type Config struct {
-	API   APIConfig `yaml:"api"`
-	ZEV   ZEVConfig `yaml:"zev,omitempty"`
-	Debug bool
+	API       APIConfig       `yaml:"api"`
+	LowTariff LowTariffConfig `yaml:"lowTariff"`
+	ZEV       ZEVConfig       `yaml:"zev,omitempty"`
+	Debug     bool
 }
 
 func Load(filename string) (*Config, error) {

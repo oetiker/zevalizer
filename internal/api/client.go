@@ -9,6 +9,7 @@ import (
 	"time"
 	"zevalizer/internal/config"
 	"zevalizer/internal/models"
+	// "github.com/goccy/go-yaml"
 )
 
 type Client struct {
@@ -21,7 +22,7 @@ func NewClient(config *config.Config) *Client {
 	return &Client{
 		config:    config,
 		http:      &http.Client{},
-		chunkDays: 5, // default to 5-day chunks
+		chunkDays: 30, // default to 5-day chunks
 	}
 }
 
@@ -110,6 +111,12 @@ func (c *Client) GetSensors(smID string) ([]models.Sensor, error) {
 	if err := json.Unmarshal(body, &sensors); err != nil {
 		return nil, fmt.Errorf("decoding response: %v\nResponse body: %s", err, string(body))
 	}
+	// yamlData, err := yaml.Marshal(sensors)
+	// if err != nil {
+	// 	fmt.Printf("error marshaling to yaml: %v\n", err)
+	// 	return nil, err
+	// }
+	// fmt.Println(string(yamlData))
 
 	return sensors, nil
 }
@@ -118,7 +125,7 @@ func (c *Client) GetSensorData(smId string, sensorID string, from, to time.Time)
 	var allData []models.SensorData
 
 	// Calculate number of chunks needed
-	totalDays := int(to.Sub(from).Hours() / 24)
+	totalDays := int(to.Sub(from).Hours()/24) + 1
 	numChunks := (totalDays + c.chunkDays - 1) / c.chunkDays // Round up
 
 	// Process each chunk
@@ -136,6 +143,7 @@ func (c *Client) GetSensorData(smId string, sensorID string, from, to time.Time)
 		toStr := chunkEnd.UTC().Format("2006-01-02T15:04:05.000Z")
 		query := fmt.Sprintf("?from=%s&to=%s&interval=900", fromStr, toStr)
 		fullPath := path + query
+		fmt.Printf("Fetching sensor data from: %s\n", fullPath)
 
 		req, err := c.createRequest("GET", fullPath)
 		if err != nil {
@@ -177,11 +185,12 @@ func (c *Client) GetZevData(smId string, from, to time.Time) ([]models.ZevData, 
 	var allData []models.ZevData
 
 	// Calculate number of chunks needed
-	totalDays := int(to.Sub(from).Hours() / 24)
+	totalDays := int(to.Sub(from).Hours()/24) + 1
 	numChunks := (totalDays + c.chunkDays - 1) / c.chunkDays // Round up
 
 	// Process each chunk
 	chunkStart := from
+	fmt.Printf("Total days: %d, numChunks: %d\n", totalDays, numChunks)
 	for chunk := 0; chunk < numChunks; chunk++ {
 		// Calculate chunk end
 		chunkEnd := chunkStart.Add(time.Duration(c.chunkDays) * 24 * time.Hour)
@@ -199,7 +208,7 @@ func (c *Client) GetZevData(smId string, from, to time.Time) ([]models.ZevData, 
 		if err != nil {
 			return nil, fmt.Errorf("creating request: %v", err)
 		}
-
+		fmt.Printf("Fetching zev data from: %s\n", fullPath)
 		resp, err := c.http.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("making request: %v", err)

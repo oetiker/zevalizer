@@ -19,6 +19,7 @@ type EnergyStats struct {
 	GridImport       float64
 	GridExport       float64
 	Production       float64
+	Consumption      float64
 	BatteryCharge    float64
 	BatteryDischarge float64
 	Consumers        []ConsumerStats
@@ -28,9 +29,9 @@ type EnergyStats struct {
 type ConsumerStats struct {
 	Sensor  *models.Sensor
 	Sources struct {
-		FromSolar   float64
-		FromBattery float64
-		FromGrid    float64
+		FromInverter float64
+		FromBattery  float64
+		FromGrid     float64
 	}
 	Total float64
 }
@@ -55,35 +56,34 @@ func (stats *EnergyStats) AutarchyRate() float64 {
 
 // IntervalData holds all energy data for a single 900-second interval
 type IntervalData struct {
-	Start            time.Time
-	End              time.Time
-	GridImport       float64
-	GridExport       float64
-	SolarProduction  float64
-	BatteryCharge    float64
-	BatteryDischarge float64
-	ConsumerUsage    map[string]float64 // key: consumer ID
+	Start                    time.Time
+	End                      time.Time
+	GridImport               float64
+	GridExport               float64
+	InverterGeneratedPower   float64
+	InverterPowerConsumption float64
+	BatteryCharge            float64
+	BatteryDischarge         float64
+	ConsumerUsage            map[string]float64 // key: consumer ID
 }
 
 type EnergyAnalyzer struct {
 	client    *api.Client
-	config    *config.ZEVConfig
-	debug     bool
+	config    *config.Config
 	sensorMap map[string]*models.Sensor
 	intervals []*IntervalData
 }
 
 func (ea *EnergyAnalyzer) debugf(format string, args ...interface{}) {
-	if ea.debug {
+	if ea.config.Debug {
 		fmt.Printf("DEBUG: "+format+"\n", args...)
 	}
 }
 
-func NewEnergyAnalyzer(client *api.Client, config *config.ZEVConfig, debug bool) *EnergyAnalyzer {
+func NewEnergyAnalyzer(client *api.Client, config *config.Config) *EnergyAnalyzer {
 	return &EnergyAnalyzer{
 		client:    client,
 		config:    config,
-		debug:     debug,
 		sensorMap: make(map[string]*models.Sensor),
 	}
 }
@@ -105,7 +105,7 @@ func (ea *EnergyAnalyzer) loadSensors(smId string) error {
 
 	// Log configured production IDs
 	ea.debugf("\nConfigured Production IDs:")
-	for _, id := range ea.config.ProductionIDs {
+	for _, id := range ea.config.ZEV.ProductionIDs {
 		if sensor, ok := ea.sensorMap[id]; ok {
 			ea.debugf("  %s: %s", id, sensor.DeviceGroup)
 		} else {
@@ -116,10 +116,10 @@ func (ea *EnergyAnalyzer) loadSensors(smId string) error {
 	return nil
 }
 
-func (ea *EnergyAnalyzer) Analyze(smId string, from, to time.Time) (*EnergyStats, error) {
+func (ea *EnergyAnalyzer) Analyze(smId string, from, to time.Time) (*EnergyStats, *EnergyStats, error) {
 	// Initialize data structures
 	if err := ea.loadSensors(smId); err != nil {
-		return nil, fmt.Errorf("loading sensors: %w", err)
+		return nil, nil, fmt.Errorf("loading sensors: %w", err)
 	}
 
 	// Create intervals array covering the entire period
@@ -127,24 +127,31 @@ func (ea *EnergyAnalyzer) Analyze(smId string, from, to time.Time) (*EnergyStats
 	ea.debugf("Created %d intervals for analysis", len(ea.intervals))
 
 	// Collect data for each source
-	if err := ea.collectGridData(smId, from, to); err != nil {
-		return nil, fmt.Errorf("collecting grid data: %w", err)
+	data, err := ea.client.GetZevData(smId, from, to)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	if err := ea.collectSolarData(smId, from, to); err != nil {
-		return nil, fmt.Errorf("collecting solar data: %w", err)
+	if err := ea.collectGridData(data); err != nil {
+		return nil, nil, fmt.Errorf("collecting grid data: %w", err)
+	}
+
+	if err := ea.collectInverterData(data); err != nil {
+		return nil, nil, fmt.Errorf("collecting inverter data: %w", err)
+	}
+
+	if err := ea.collectConsumerData(data); err != nil {
+		return nil, nil, fmt.Errorf("collecting consumer data: %w", err)
 	}
 
 	if err := ea.collectBatteryData(smId, from, to); err != nil {
-		return nil, fmt.Errorf("collecting battery data: %w", err)
-	}
-
-	if err := ea.collectConsumerData(smId, from, to); err != nil {
-		return nil, fmt.Errorf("collecting consumer data: %w", err)
+		return nil, nil, fmt.Errorf("collecting battery data: %w", err)
 	}
 
 	// Process intervals and create final statistics
-	return ea.calculateStats(), nil
+	statLowTariff, err := ea.calculateStats(true)
+	statHighTariff, err := ea.calculateStats(false)
+	return statLowTariff, statHighTariff, err
 }
 
 func (ea *EnergyAnalyzer) createIntervals(from, to time.Time) {
@@ -177,18 +184,13 @@ func (ea *EnergyAnalyzer) findInterval(t time.Time) *IntervalData {
 	return nil
 }
 
-func (ea *EnergyAnalyzer) collectGridData(smId string, from, to time.Time) error {
-	if ea.config.GridMeterID == "" {
+func (ea *EnergyAnalyzer) collectGridData(data []models.ZevData) error {
+	if ea.config.ZEV.GridMeterID == "" {
 		return nil
 	}
 
-	data, err := ea.client.GetZevData(smId, from, to)
-	if err != nil {
-		return err
-	}
-
 	for _, sensorData := range data {
-		if sensorData.SensorID != ea.config.GridMeterID {
+		if sensorData.SensorID != ea.config.ZEV.GridMeterID {
 			continue
 		}
 
@@ -199,6 +201,10 @@ func (ea *EnergyAnalyzer) collectGridData(smId string, from, to time.Time) error
 
 			interval := ea.findInterval(current.CreatedAt)
 			if interval == nil {
+				continue
+			}
+
+			if previous.CurrentEnergyDeliveryTariff1 == 0 && current.CurrentEnergyDeliveryTariff1 != 0 {
 				continue
 			}
 
@@ -218,12 +224,8 @@ func (ea *EnergyAnalyzer) collectGridData(smId string, from, to time.Time) error
 	return nil
 }
 
-func (ea *EnergyAnalyzer) collectSolarData(smId string, from, to time.Time) error {
-	for _, prodId := range ea.config.ProductionIDs {
-		data, err := ea.client.GetZevData(smId, from, to)
-		if err != nil {
-			return err
-		}
+func (ea *EnergyAnalyzer) collectInverterData(data []models.ZevData) error {
+	for _, prodId := range ea.config.ZEV.ProductionIDs {
 
 		for _, sensorData := range data {
 			if sensorData.SensorID != prodId {
@@ -244,8 +246,14 @@ func (ea *EnergyAnalyzer) collectSolarData(smId string, from, to time.Time) erro
 					ea.debugf("Skipping abnormal production reading: %.1f", production)
 					continue
 				}
+				consumtion := current.CurrentEnergyPurchaseTariff1 - previous.CurrentEnergyPurchaseTariff1
+				if consumtion > 10000 || consumtion < 0 {
+					ea.debugf("Skipping abnormal consumtion reading: %.1f", consumtion)
+					continue
+				}
 
-				interval.SolarProduction += production
+				interval.InverterGeneratedPower += production
+				interval.InverterPowerConsumption += consumtion
 			}
 		}
 	}
@@ -253,7 +261,7 @@ func (ea *EnergyAnalyzer) collectSolarData(smId string, from, to time.Time) erro
 }
 
 func (ea *EnergyAnalyzer) collectBatteryData(smId string, from, to time.Time) error {
-	for _, batteryId := range ea.config.BatterySystemIDs {
+	for _, batteryId := range ea.config.ZEV.BatterySystemIDs {
 		data, err := ea.client.GetSensorData(smId, batteryId, from, to)
 		if err != nil {
 			return err
@@ -274,7 +282,7 @@ func (ea *EnergyAnalyzer) collectBatteryData(smId string, from, to time.Time) er
 			if sensor.Data.InvertMeasurement {
 				charge, discharge = discharge, charge
 			}
-
+			ea.debugf("%s, Battery: %s, Charge: %.1f kWh, Discharge: %.1f kWh", current.Date.Format("2006-01-02 15:04:05 MST"), batteryId, charge/1000, discharge/1000)
 			interval.BatteryCharge += charge
 			interval.BatteryDischarge += discharge
 		}
@@ -282,12 +290,8 @@ func (ea *EnergyAnalyzer) collectBatteryData(smId string, from, to time.Time) er
 	return nil
 }
 
-func (ea *EnergyAnalyzer) collectConsumerData(smId string, from, to time.Time) error {
-	for _, consumerId := range ea.config.ConsumerIDs {
-		data, err := ea.client.GetZevData(smId, from, to)
-		if err != nil {
-			return err
-		}
+func (ea *EnergyAnalyzer) collectConsumerData(data []models.ZevData) error {
+	for _, consumerId := range ea.config.ZEV.ConsumerIDs {
 
 		sensor := ea.sensorMap[consumerId]
 		for _, sensorData := range data {
@@ -309,7 +313,7 @@ func (ea *EnergyAnalyzer) collectConsumerData(smId string, from, to time.Time) e
 					usage = current.CurrentEnergyDeliveryTariff1 - previous.CurrentEnergyDeliveryTariff1
 				}
 
-				if usage > 1000 {
+				if usage > 10000 {
 					ea.debugf("Skipping abnormal consumer usage: %.1f", usage)
 					continue
 				}
@@ -321,8 +325,9 @@ func (ea *EnergyAnalyzer) collectConsumerData(smId string, from, to time.Time) e
 	return nil
 }
 
-func (ea *EnergyAnalyzer) calculateStats() *EnergyStats {
+func (ea *EnergyAnalyzer) calculateStats(lowTariff bool) (*EnergyStats, error) {
 	stats := &EnergyStats{}
+
 	if len(ea.intervals) > 0 {
 		stats.Period.Start = ea.intervals[0].Start
 		stats.Period.End = ea.intervals[len(ea.intervals)-1].End
@@ -330,7 +335,7 @@ func (ea *EnergyAnalyzer) calculateStats() *EnergyStats {
 
 	// Initialize consumer stats
 	consumerStats := make(map[string]*ConsumerStats)
-	for _, consumerId := range ea.config.ConsumerIDs {
+	for _, consumerId := range ea.config.ZEV.ConsumerIDs {
 		consumerStats[consumerId] = &ConsumerStats{
 			Sensor: ea.sensorMap[consumerId],
 		}
@@ -347,39 +352,62 @@ func (ea *EnergyAnalyzer) calculateStats() *EnergyStats {
 
 	// Process each interval
 	for _, interval := range ea.intervals {
-		ea.debugf("\nProcessing interval: %s to %s",
+
+		// if interval.Start.Hour() >= ea.config.LowTariff.StartHour || interval.End.Hour() < ea.config.LowTariff.EndHour {
+		// 	if !lowTariff {
+		// 		continue
+		// 	}
+		// } else if lowTariff {
+		// 	continue
+		// }
+		ea.debugf("\nProcessing %s interval: %s to %s",
+			func() string {
+				if lowTariff {
+					return "Low-Tariff"
+				}
+				return "High-Tariff"
+			}(),
 			interval.Start.Format("15:04:05"),
 			interval.End.Format("15:04:05"))
 
+		ea.debugf("Grid Import: %.1f kWh", interval.GridImport/1000)
+		ea.debugf("Grid Export: %.1f kWh", interval.GridExport/1000)
+		ea.debugf("Inverter Production: %.1f kWh", interval.InverterGeneratedPower/1000)
+		ea.debugf("Inverter Consumtion: %.1f kWh", interval.InverterPowerConsumption/1000)
+		ea.debugf("Battery Charge: %.1f kWh", interval.BatteryCharge/1000)
+		ea.debugf("Battery Discharge: %.1f kWh", interval.BatteryDischarge/1000)
+
 		// Accumulate totals
+
 		stats.GridImport += interval.GridImport
 		stats.GridExport += interval.GridExport
-		stats.Production += interval.SolarProduction
+		stats.Production += interval.InverterGeneratedPower
+		stats.Consumption += interval.InverterPowerConsumption
 		stats.BatteryCharge += interval.BatteryCharge
 		stats.BatteryDischarge += interval.BatteryDischarge
 
 		// Calculate total energy input and consumption for this interval
-		totalInput := interval.GridImport + interval.SolarProduction + interval.BatteryDischarge
+		totalInput := interval.GridImport + interval.InverterGeneratedPower
 
 		// Sum up all consumer usage for this interval
-		var totalConsumption float64
+		var totalEnergyConsumption float64
 		for _, usage := range interval.ConsumerUsage {
-			totalConsumption += usage
+			totalEnergyConsumption += usage
 		}
 
 		// Calculate energy outputs
-		totalOutput := totalConsumption + interval.GridExport + interval.BatteryCharge
+		totalOutput := totalEnergyConsumption + interval.GridExport + interval.InverterPowerConsumption
 
-		// Calculate excess (shared) energy
-		excess := totalInput - totalOutput
-		if excess > 0 {
+		// Calculate sharedUseEnergy (shared) energy
+		sharedUseEnergy := totalInput - totalOutput
+		if sharedUseEnergy > 0 {
 			ea.debugf("Shared energy in interval: %.1f Wh (Input: %.1f, Output: %.1f)",
-				excess, totalInput, totalOutput)
+				sharedUseEnergy, totalInput, totalOutput)
 			// Add shared usage as a special consumer
-			interval.ConsumerUsage["shared"] = excess
-		} else if excess < -1 { // use -1 to account for small floating point differences
+			interval.ConsumerUsage["shared"] = sharedUseEnergy
+		} else if sharedUseEnergy < -1 { // use -1 to account for small floating point differences
 			ea.debugf("Warning: Negative energy balance in interval: %.1f Wh (Input: %.1f, Output: %.1f)",
-				excess, totalInput, totalOutput)
+				sharedUseEnergy, totalInput, totalOutput)
 		}
 
 		// Use totalInput as available energy for distribution
@@ -388,12 +416,12 @@ func (ea *EnergyAnalyzer) calculateStats() *EnergyStats {
 		}
 
 		// Calculate source percentages for this interval
-		solarShare := interval.SolarProduction / totalInput
+		inverterShare := (interval.InverterGeneratedPower - interval.BatteryDischarge) / totalInput
 		batteryShare := interval.BatteryDischarge / totalInput
 		gridShare := interval.GridImport / totalInput
 
-		ea.debugf("Interval energy shares: Solar=%.1f%% Battery=%.1f%% Grid=%.1f%%",
-			solarShare*100, batteryShare*100, gridShare*100)
+		ea.debugf("Interval energy shares: Inverter=%.1f%% Battery=%.1f%% Grid=%.1f%%",
+			inverterShare*100, batteryShare*100, gridShare*100)
 
 		// Distribute each consumer's usage according to source percentages
 		for consumerId, usage := range interval.ConsumerUsage {
@@ -403,13 +431,13 @@ func (ea *EnergyAnalyzer) calculateStats() *EnergyStats {
 
 			consumer := consumerStats[consumerId]
 			consumer.Total += usage
-			consumer.Sources.FromSolar += usage * solarShare
+			consumer.Sources.FromInverter += usage * inverterShare
 			consumer.Sources.FromBattery += usage * batteryShare
 			consumer.Sources.FromGrid += usage * gridShare
 
-			ea.debugf("Consumer %s interval usage: %.1f (Solar: %.1f, Battery: %.1f, Grid: %.1f)",
+			ea.debugf("Consumer %s interval usage: %.1f (Inverter: %.1f, Battery: %.1f, Grid: %.1f)",
 				consumer.Sensor.Tag.Name, usage,
-				usage*solarShare,
+				usage*inverterShare,
 				usage*batteryShare,
 				usage*gridShare)
 		}
@@ -420,5 +448,5 @@ func (ea *EnergyAnalyzer) calculateStats() *EnergyStats {
 		stats.Consumers = append(stats.Consumers, *consumerStat)
 	}
 
-	return stats
+	return stats, nil
 }
