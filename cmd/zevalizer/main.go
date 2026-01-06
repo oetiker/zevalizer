@@ -4,10 +4,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
+
 	"zevalizer/internal/analyzer"
 	"zevalizer/internal/api"
+	"zevalizer/internal/cache"
 	"zevalizer/internal/config"
 	"zevalizer/internal/setup"
 )
@@ -53,7 +56,7 @@ func printSetupHint(zevConfig *config.ZEVConfig) {
 
 // Update the analyzeEnergy function in main.go
 
-func analyzeEnergy(client *api.Client, cfg *config.Config, smId string, from, to time.Time) error {
+func analyzeEnergy(client analyzer.DataFetcher, cfg *config.Config, smId string, from, to time.Time) error {
 	energyAnalyzer := analyzer.NewEnergyAnalyzer(client, cfg)
 	statsLT, statsHT, err := energyAnalyzer.Analyze(smId, from, to)
 	if err != nil {
@@ -140,24 +143,54 @@ func parseDate(dateStr string) (time.Time, error) {
 
 func main() {
 	var (
-		startDate string
-		endDate   string
-		days      int
+		startDate  string
+		endDate    string
+		days       int
+		noCache    bool
+		clearCache bool
+		dumpCache  bool
 	)
 
 	flag.StringVar(&startDate, "from", "", "Start date (format: YYYY-MM-DD or DD.MM.YYYY)")
 	flag.StringVar(&endDate, "to", "", "End date (format: YYYY-MM-DD or DD.MM.YYYY)")
 	flag.IntVar(&days, "days", 0, "Number of days to analyze (ignored if from/to are specified)")
-	analyze := flag.Bool("analyze", false, "Analyze setup and suggest configuration")
+	analyzeFlag := flag.Bool("analyze", false, "Analyze setup and suggest configuration")
 	energy := flag.Bool("energy", false, "Show energy analysis")
 	debug := flag.Bool("debug", false, "Enable debug output")
+	flag.BoolVar(&noCache, "no-cache", false, "Disable caching, fetch all data fresh")
+	flag.BoolVar(&clearCache, "clear-cache", false, "Clear the cache before running")
+	flag.BoolVar(&dumpCache, "dump-cache", false, "Dump cache contents and exit")
 	flag.Parse()
 
-	cfg, err := config.Load("config.yaml")
+	configPath := "config.yaml"
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 	cfg.Debug = *debug
+
+	cachePath := cache.CacheFilePath(configPath)
+
+	// Handle dump-cache command (doesn't need API connection)
+	if dumpCache {
+		c, err := cache.Load(cachePath, "")
+		if err != nil {
+			log.Fatalf("Failed to load cache: %v", err)
+		}
+		c.Dump(os.Stdout)
+		return
+	}
+
+	// Handle clear-cache command
+	if clearCache {
+		if err := cache.Delete(cachePath); err != nil {
+			log.Fatalf("Failed to clear cache: %v", err)
+		}
+		fmt.Println("Cache cleared.")
+		if !*analyzeFlag && !*energy {
+			return
+		}
+	}
 
 	client := api.NewClient(cfg)
 
@@ -172,7 +205,7 @@ func main() {
 
 	smId := users[0].SmID
 
-	if *analyze {
+	if *analyzeFlag {
 		setupAnalyzer := setup.NewAnalyzer(client)
 		zevConfig, err := setupAnalyzer.AnalyzeSetup(smId)
 		if err != nil {
@@ -183,6 +216,12 @@ func main() {
 	}
 
 	if *energy {
+		// Create cached client wrapper
+		cachedClient, err := cache.NewCachedClient(client, cachePath, smId, !noCache, cfg.Debug)
+		if err != nil {
+			log.Fatalf("Failed to initialize cache: %v", err)
+		}
+
 		// Handle time range
 		var from, to time.Time
 		now := time.Now()
@@ -217,7 +256,7 @@ func main() {
 				to.Format("2006-01-02 15:04:05 MST"))
 		}
 
-		if err := analyzeEnergy(client, cfg, smId, from, to); err != nil {
+		if err := analyzeEnergy(cachedClient, cfg, smId, from, to); err != nil {
 			log.Fatalf("Energy analysis failed: %v", err)
 		}
 		return

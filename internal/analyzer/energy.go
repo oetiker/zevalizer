@@ -5,7 +5,7 @@ package analyzer
 import (
 	"fmt"
 	"time"
-	"zevalizer/internal/api"
+
 	"zevalizer/internal/config"
 	"zevalizer/internal/models"
 )
@@ -84,8 +84,16 @@ type IntervalData struct {
 	ConsumerUsage            map[string]float64 // key: consumer ID
 }
 
+// DataFetcher is an interface for fetching data from the API
+// Both api.Client and cache.CachedClient implement this interface
+type DataFetcher interface {
+	GetZevData(smId string, from, to time.Time) ([]models.ZevData, error)
+	GetSensorData(smId string, sensorID string, from, to time.Time) ([]models.SensorData, error)
+	GetSensors(smID string) ([]models.Sensor, error)
+}
+
 type EnergyAnalyzer struct {
-	client    *api.Client
+	client    DataFetcher
 	config    *config.Config
 	sensorMap map[string]*models.Sensor
 	intervals []*IntervalData
@@ -97,7 +105,7 @@ func (ea *EnergyAnalyzer) debugf(format string, args ...interface{}) {
 	}
 }
 
-func NewEnergyAnalyzer(client *api.Client, config *config.Config) *EnergyAnalyzer {
+func NewEnergyAnalyzer(client DataFetcher, config *config.Config) *EnergyAnalyzer {
 	return &EnergyAnalyzer{
 		client:    client,
 		config:    config,
@@ -148,6 +156,12 @@ func (ea *EnergyAnalyzer) loadSensors(smId string) error {
 }
 
 func (ea *EnergyAnalyzer) Analyze(smId string, from, to time.Time) (*EnergyStats, *EnergyStats, error) {
+	// Validate inverter efficiency config
+	eff := ea.config.ZEV.InverterEfficiency
+	if eff != 0 && (eff < 0 || eff > 1) {
+		return nil, nil, fmt.Errorf("invalid inverterEfficiency %.2f: must be between 0 and 1", eff)
+	}
+
 	// Initialize data structures
 	if err := ea.loadSensors(smId); err != nil {
 		return nil, nil, fmt.Errorf("loading sensors: %w", err)
@@ -278,19 +292,24 @@ func (ea *EnergyAnalyzer) collectInverterData(data []models.ZevData) error {
 					continue
 				}
 
-				production := current.CurrentEnergyDeliveryTariff1 - previous.CurrentEnergyDeliveryTariff1
-				if production > MaxProductionReadingWh || production < 0 {
-					ea.debugf("Skipping abnormal production reading: %.1f", production)
+				delivery := current.CurrentEnergyDeliveryTariff1 - previous.CurrentEnergyDeliveryTariff1
+				if delivery > MaxProductionReadingWh || delivery < 0 {
+					ea.debugf("Skipping abnormal delivery reading: %.1f", delivery)
 					continue
 				}
-				consumption := current.CurrentEnergyPurchaseTariff1 - previous.CurrentEnergyPurchaseTariff1
-				if consumption > MaxProductionReadingWh || consumption < 0 {
-					ea.debugf("Skipping abnormal consumption reading: %.1f", consumption)
+				purchase := current.CurrentEnergyPurchaseTariff1 - previous.CurrentEnergyPurchaseTariff1
+				if purchase > MaxProductionReadingWh || purchase < 0 {
+					ea.debugf("Skipping abnormal purchase reading: %.1f", purchase)
 					continue
 				}
 
-				interval.InverterGeneratedPower += production
-				interval.InverterPowerConsumption += consumption
+				// Use NET formula: production = delivery - purchase
+				// This removes phantom power circulation from hybrid inverters
+				// Positive = inverter contributing energy (solar/battery)
+				// Negative = inverter consuming energy (standby, losses)
+				interval.InverterGeneratedPower += delivery - purchase
+				// Don't add purchase to InverterPowerConsumption separately -
+				// it's already accounted for in the NET calculation
 			}
 		}
 	}
@@ -451,8 +470,24 @@ func (ea *EnergyAnalyzer) calculateStats(lowTariff bool) (*EnergyStats, error) {
 		}
 
 		// Calculate source percentages for this interval
-		inverterShare := (interval.InverterGeneratedPower - interval.BatteryDischarge) / totalInput
-		batteryShare := interval.BatteryDischarge / totalInput
+		// Battery discharge is measured at DC side, but inverter output is AC
+		// Apply inverter efficiency to convert battery DC to AC contribution
+		inverterEfficiency := ea.config.ZEV.InverterEfficiency
+		if inverterEfficiency == 0 {
+			inverterEfficiency = 0.93 // Default 93% efficiency if not configured
+		}
+		batteryACContribution := interval.BatteryDischarge * inverterEfficiency
+		// Cap battery contribution to inverter output (can't exceed what inverter produced)
+		if batteryACContribution > interval.InverterGeneratedPower {
+			batteryACContribution = interval.InverterGeneratedPower
+		}
+		solarContribution := interval.InverterGeneratedPower - batteryACContribution
+		if solarContribution < 0 {
+			solarContribution = 0
+		}
+
+		inverterShare := solarContribution / totalInput
+		batteryShare := batteryACContribution / totalInput
 		gridShare := interval.GridImport / totalInput
 
 		ea.debugf("Interval energy shares: Inverter=%.1f%% Battery=%.1f%% Grid=%.1f%%",
