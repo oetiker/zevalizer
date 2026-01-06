@@ -10,6 +10,23 @@ import (
 	"zevalizer/internal/models"
 )
 
+const (
+	// IntervalSeconds is the duration of each analysis interval (15 minutes)
+	IntervalSeconds = 900
+
+	// MaxGridReadingDiffWh is the maximum reasonable grid import/export per interval (30 kWh).
+	// Readings above this are considered anomalies and skipped.
+	MaxGridReadingDiffWh = 30000
+
+	// MaxProductionReadingWh is the maximum reasonable inverter production per interval (10 kWh).
+	// Readings above this are considered anomalies and skipped.
+	MaxProductionReadingWh = 10000
+
+	// MaxConsumerReadingWh is the maximum reasonable consumer usage per interval (10 kWh).
+	// Readings above this are considered anomalies and skipped.
+	MaxConsumerReadingWh = 10000
+)
+
 // EnergyStats represents energy data for a time period
 type EnergyStats struct {
 	Period struct {
@@ -88,6 +105,20 @@ func NewEnergyAnalyzer(client *api.Client, config *config.Config) *EnergyAnalyze
 	}
 }
 
+// isLowTariffHour checks if a given hour falls within the low tariff period.
+// Handles both overnight periods (e.g., 22:00-06:00) and daytime periods (e.g., 06:00-22:00).
+func (ea *EnergyAnalyzer) isLowTariffHour(hour int) bool {
+	start := ea.config.LowTariff.StartHour
+	end := ea.config.LowTariff.EndHour
+
+	if start > end {
+		// Overnight period (e.g., 22:00 - 06:00)
+		return hour >= start || hour < end
+	}
+	// Daytime period (e.g., 06:00 - 22:00)
+	return hour >= start && hour < end
+}
+
 // loadSensors initializes the sensor map
 func (ea *EnergyAnalyzer) loadSensors(smId string) error {
 	sensors, err := ea.client.GetSensors(smId)
@@ -150,12 +181,18 @@ func (ea *EnergyAnalyzer) Analyze(smId string, from, to time.Time) (*EnergyStats
 
 	// Process intervals and create final statistics
 	statLowTariff, err := ea.calculateStats(true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("calculating low tariff stats: %w", err)
+	}
 	statHighTariff, err := ea.calculateStats(false)
-	return statLowTariff, statHighTariff, err
+	if err != nil {
+		return nil, nil, fmt.Errorf("calculating high tariff stats: %w", err)
+	}
+	return statLowTariff, statHighTariff, nil
 }
 
 func (ea *EnergyAnalyzer) createIntervals(from, to time.Time) {
-	interval := time.Duration(900) * time.Second
+	interval := time.Duration(IntervalSeconds) * time.Second
 	current := from
 
 	for current.Before(to) {
@@ -211,7 +248,7 @@ func (ea *EnergyAnalyzer) collectGridData(data []models.ZevData) error {
 			purchaseDiff := current.CurrentEnergyPurchaseTariff1 - previous.CurrentEnergyPurchaseTariff1
 			deliveryDiff := current.CurrentEnergyDeliveryTariff1 - previous.CurrentEnergyDeliveryTariff1
 
-			if purchaseDiff > 30000 || deliveryDiff > 30000 {
+			if purchaseDiff > MaxGridReadingDiffWh || deliveryDiff > MaxGridReadingDiffWh {
 				ea.debugf("Skipping abnormal grid reading: purchase=%.1f delivery=%.1f",
 					purchaseDiff, deliveryDiff)
 				continue
@@ -242,18 +279,18 @@ func (ea *EnergyAnalyzer) collectInverterData(data []models.ZevData) error {
 				}
 
 				production := current.CurrentEnergyDeliveryTariff1 - previous.CurrentEnergyDeliveryTariff1
-				if production > 10000 || production < 0 {
+				if production > MaxProductionReadingWh || production < 0 {
 					ea.debugf("Skipping abnormal production reading: %.1f", production)
 					continue
 				}
-				consumtion := current.CurrentEnergyPurchaseTariff1 - previous.CurrentEnergyPurchaseTariff1
-				if consumtion > 10000 || consumtion < 0 {
-					ea.debugf("Skipping abnormal consumtion reading: %.1f", consumtion)
+				consumption := current.CurrentEnergyPurchaseTariff1 - previous.CurrentEnergyPurchaseTariff1
+				if consumption > MaxProductionReadingWh || consumption < 0 {
+					ea.debugf("Skipping abnormal consumption reading: %.1f", consumption)
 					continue
 				}
 
 				interval.InverterGeneratedPower += production
-				interval.InverterPowerConsumption += consumtion
+				interval.InverterPowerConsumption += consumption
 			}
 		}
 	}
@@ -313,7 +350,7 @@ func (ea *EnergyAnalyzer) collectConsumerData(data []models.ZevData) error {
 					usage = current.CurrentEnergyDeliveryTariff1 - previous.CurrentEnergyDeliveryTariff1
 				}
 
-				if usage > 10000 {
+				if usage > MaxConsumerReadingWh {
 					ea.debugf("Skipping abnormal consumer usage: %.1f", usage)
 					continue
 				}
@@ -352,14 +389,12 @@ func (ea *EnergyAnalyzer) calculateStats(lowTariff bool) (*EnergyStats, error) {
 
 	// Process each interval
 	for _, interval := range ea.intervals {
+		// Filter intervals based on tariff period
+		intervalIsLowTariff := ea.isLowTariffHour(interval.Start.Hour())
+		if intervalIsLowTariff != lowTariff {
+			continue
+		}
 
-		// if interval.Start.Hour() >= ea.config.LowTariff.StartHour || interval.End.Hour() < ea.config.LowTariff.EndHour {
-		// 	if !lowTariff {
-		// 		continue
-		// 	}
-		// } else if lowTariff {
-		// 	continue
-		// }
 		ea.debugf("\nProcessing %s interval: %s to %s",
 			func() string {
 				if lowTariff {
@@ -373,7 +408,7 @@ func (ea *EnergyAnalyzer) calculateStats(lowTariff bool) (*EnergyStats, error) {
 		ea.debugf("Grid Import: %.1f kWh", interval.GridImport/1000)
 		ea.debugf("Grid Export: %.1f kWh", interval.GridExport/1000)
 		ea.debugf("Inverter Production: %.1f kWh", interval.InverterGeneratedPower/1000)
-		ea.debugf("Inverter Consumtion: %.1f kWh", interval.InverterPowerConsumption/1000)
+		ea.debugf("Inverter Consumption: %.1f kWh", interval.InverterPowerConsumption/1000)
 		ea.debugf("Battery Charge: %.1f kWh", interval.BatteryCharge/1000)
 		ea.debugf("Battery Discharge: %.1f kWh", interval.BatteryDischarge/1000)
 

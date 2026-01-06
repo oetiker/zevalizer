@@ -32,22 +32,16 @@ type Config struct {
 }
 
 func Load(filename string) (*Config, error) {
-	fmt.Printf("Loading config from %s\n", filename)
 	buf, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("reading config file: %v", err)
 	}
-
-	//fmt.Printf("Read config content:\n%s\n", string(buf))
 
 	c := &Config{}
 	err = yaml.Unmarshal(buf, c)
 	if err != nil {
 		return nil, fmt.Errorf("parsing yaml: %v", err)
 	}
-
-	// Debug output
-	//fmt.Printf("Parsed config: %+v\n", c)
 
 	return c, nil
 }

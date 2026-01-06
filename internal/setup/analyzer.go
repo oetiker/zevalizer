@@ -52,13 +52,12 @@ func (sa *Analyzer) AnalyzeSetup(smId string) (*config.ZEVConfig, error) {
 		}
 	}
 
-	// Find consumer meters
+	// Find consumer meters (SubMeterCostTypes: 0=regular consumer, 4=heat pump)
 	for _, sensor := range sensors {
 		if sensor.Type == "Smart Meter" &&
 			sensor.DeviceType == "sub-meter" &&
-			sensor.Data.SubMeterCostTypes == 0 {
+			(sensor.Data.SubMeterCostTypes == 0 || sensor.Data.SubMeterCostTypes == 4) {
 			zevConfig.ConsumerIDs = append(zevConfig.ConsumerIDs, sensor.ID+"  # "+sensor.Tag.Name)
-
 		}
 	}
 

@@ -81,7 +81,7 @@ func printEnergyStats(stats *analyzer.EnergyStats) {
 	fmt.Printf("Grid Export:       %8.1f kWh\n", stats.GridExport/1000)
 	fmt.Printf("Production:        %8.1f kWh\n", stats.Production/1000)
 	fmt.Printf("Consumption:       %8.1f kWh\n", stats.Consumption/1000)
-	fmt.Printf("Battery Charge:    %8.1f k Wh\n", stats.BatteryCharge/1000)
+	fmt.Printf("Battery Charge:    %8.1f kWh\n", stats.BatteryCharge/1000)
 	fmt.Printf("Battery Discharge: %8.1f kWh\n", stats.BatteryDischarge/1000)
 	fmt.Printf("Self Consumption:  %8.1f %%\n", stats.SelfConsumptionRate())
 	fmt.Printf("Autarchy:          %8.1f %%\n", stats.AutarchyRate())

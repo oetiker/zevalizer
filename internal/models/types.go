@@ -10,7 +10,7 @@ type SensorTag struct {
 }
 
 type SensorMetaData struct {
-	Device_ID          string `json:"Device_ID,omitempty"`
+	DeviceID           string `json:"Device_ID,omitempty"`
 	InvertMeasurement  bool   `json:"invertMeasurement,omitempty"`
 	SmartMeterPosition string `json:"SmartMeterPosition,omitempty"`
 	SubMeterCostTypes  int    `json:"subMeterCostTypes,omitempty"`
