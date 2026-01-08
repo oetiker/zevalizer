@@ -477,12 +477,17 @@ func (ea *EnergyAnalyzer) calculateStats(lowTariff bool) (*EnergyStats, error) {
 			inverterEfficiency = 0.93 // Default 93% efficiency if not configured
 		}
 		batteryACContribution := interval.BatteryDischarge * inverterEfficiency
-		// Cap battery contribution to inverter output (can't exceed what inverter produced)
-		if batteryACContribution > interval.InverterGeneratedPower {
-			batteryACContribution = interval.InverterGeneratedPower
-		}
 		solarContribution := interval.InverterGeneratedPower - batteryACContribution
-		if solarContribution < 0 {
+
+		// Handle two cases of negative solarContribution:
+		// 1. InverterGeneratedPower < 0: True consumption (grid charging battery)
+		//    -> This is "common power", attributed to Shared Usage
+		// 2. InverterGeneratedPower >= 0 but solarContribution < 0: Efficiency mismatch
+		//    -> Cap battery contribution to inverter output, solar = 0
+		inverterConsuming := interval.InverterGeneratedPower < 0
+		if !inverterConsuming && solarContribution < 0 {
+			// Efficiency mismatch: battery can't contribute more than inverter output
+			batteryACContribution = interval.InverterGeneratedPower
 			solarContribution = 0
 		}
 
@@ -490,8 +495,8 @@ func (ea *EnergyAnalyzer) calculateStats(lowTariff bool) (*EnergyStats, error) {
 		batteryShare := batteryACContribution / totalInput
 		gridShare := interval.GridImport / totalInput
 
-		ea.debugf("Interval energy shares: Inverter=%.1f%% Battery=%.1f%% Grid=%.1f%%",
-			inverterShare*100, batteryShare*100, gridShare*100)
+		ea.debugf("Interval energy shares: Inverter=%.1f%% Battery=%.1f%% Grid=%.1f%% (consuming=%v)",
+			inverterShare*100, batteryShare*100, gridShare*100, inverterConsuming)
 
 		// Distribute each consumer's usage according to source percentages
 		for consumerId, usage := range interval.ConsumerUsage {
@@ -501,9 +506,19 @@ func (ea *EnergyAnalyzer) calculateStats(lowTariff bool) (*EnergyStats, error) {
 
 			consumer := consumerStats[consumerId]
 			consumer.Total += usage
-			consumer.Sources.FromInverter += usage * inverterShare
-			consumer.Sources.FromBattery += usage * batteryShare
-			consumer.Sources.FromGrid += usage * gridShare
+
+			if inverterConsuming && consumerId != "shared" {
+				// Regular consumers: don't show negative inverter, adjust grid share
+				// The inverter consumption is common power, attributed to Shared Usage
+				consumer.Sources.FromInverter += 0
+				consumer.Sources.FromBattery += usage * batteryShare
+				consumer.Sources.FromGrid += usage * (gridShare + inverterShare) // grid covers inverter consumption
+			} else {
+				// Normal case OR Shared Usage (which gets the inverter consumption)
+				consumer.Sources.FromInverter += usage * inverterShare
+				consumer.Sources.FromBattery += usage * batteryShare
+				consumer.Sources.FromGrid += usage * gridShare
+			}
 
 			ea.debugf("Consumer %s interval usage: %.1f (Inverter: %.1f, Battery: %.1f, Grid: %.1f)",
 				consumer.Sensor.Tag.Name, usage,
